@@ -1,0 +1,359 @@
+---
+title: "R Notebook"
+output:
+  html_document:
+    df_print: paged
+---
+
+```{r}
+library(dplyr) 
+library(caret)
+library(mice)
+```
+
+# Read Training Dataset
+
+```{r}
+train_x <- read.csv("..//data//train_x.csv",na.strings="")
+head(train_x)
+```
+
+## About the training set 
+
+```{r}
+dim(train_x)
+```
+
+```{r}
+str(train_x)
+```
+
+converting age to factor
+
+```{r}
+train_x$Age <- as.factor(train_x$Age)
+```
+
+Calculate the amount of missing/imputed values in each variable and the amount of missing/imputed values in certain combinations of variables.
+
+```{r}
+VIM::aggr(train_x, plot = FALSE, combined=FALSE)
+```
+
+# Read test data
+
+```{r}
+test_x <- read.csv("..//data//test_x.csv",na.strings="")
+test_x$Age <- as.factor(test_x$Age)
+head(test_x)
+```
+
+
+```{r}
+str(test_x)
+```
+
+# Read training labels
+
+```{r}
+train_y <- read.csv("..//data//train y.csv")
+```
+
+```{r}
+dim(train_y)
+```
+
+```{r}
+str(train_y)
+```
+
+```{r}
+train_y$Label <- as.factor(train_y$Label)
+```
+
+# proportion of labels
+
+```{r}
+prop.table(table(train_y$Label))
+```
+
+*highly imbalanced* 
+
+# MICE
+ The package creates multiple imputations (replacement values) for multivariate missing data
+
+on combining train x and train y, rows with missing values: 
+
+```{r}
+combined     <- merge(x = train_x, y = train_y, by = "ID", all = TRUE)
+df <- dplyr::select(combined, -ID)
+init = mice::mice(df, maxit=0)
+meth  = init$method
+predM = init$predictorMatrix
+```
+
+```{r}
+meth[c("Label")]                                                              = ""
+meth[c("Expense", "Income", "Score1", "Score2", "Score3", "Score4", "Score5")]= "norm"
+meth[c("Loan.type", "Age")]                                                   = "logreg"
+meth[c("Occupation.type")]                                                    = "polyreg"
+```
+
+```{r}
+set.seed(103)
+imputed = mice::mice(df, method=meth, predictorMatrix=predM, m=5)
+imputed <- tidyr::complete(imputed)
+```
+
+Check for missing values in the imputed dataset.
+
+```{r}
+sapply(imputed, function(x) sum(is.na(x)))
+```
+
+removing the rows where no label is found
+
+*df will be the final imputed dataset*
+
+```{r}
+completeVec  <- complete.cases(imputed[,  "Label"]) # selects only those rows where label != NA
+df           <- imputed[completeVec, ] # the df which has rows with a label
+```
+
+```{r}
+dim(df)
+sapply(df, function(x) sum(is.na(x)))
+```
+
+```{r}
+str(df)
+```
+
+# Visualisation
+
+```{r}
+b <- barplot(table(df$Loan.type), main="Loan Type",xlab="loan type",ylab="Count")
+text(x=b, y=table(df$Loan.type)-5000, labels=as.character(table(df$Loan.type)))
+```
+
+```{r}
+b <- barplot(table(df$Occupation.type), main="Occupation Type",xlab="occupation type",ylab="Count")
+text(x=b, y=table(df$Occupation.type)-5000, labels=as.character(table(df$Occupation.type)))
+```
+
+```{r}
+b <- barplot(table(df$Age), main="Age",xlab="age",ylab="Count", ylim = c(0,50000))
+text(x=b, y=table(df$Age)+5000, labels=as.character(table(df$Age)))
+```
+
+
+```{r}
+b <- barplot(table(df$Label), main="Label",xlab="label",ylab="Count")
+text(x=b, y=table(df$Label)-1000, labels=as.character(table(df$Label)))
+```
+
+# Correlation 
+
+```{r}
+cols_to_train <- cbind("Expense", "Income", "Score1", "Score2", "Score3", "Score4", "Loan.type", "Occupation.type", "Age", "Label")
+pred_cols     <- cbind("Expense", "Income", "Score1", "Score2", "Score3", "Score4", "Loan.type", "Occupation.type", "Age")
+ncols_to_train <- cbind("Expense", "Income", "Score1", "Score2", "Score3", "Score4", "Label")
+
+```
+
+```{r}
+correlation_matrix <- cor(df[,c("Expense", "Income", "Score1", "Score2", "Score3", "Score4", "Score5")])
+print(correlation_matrix)
+```
+
+
+```{r}
+corrplot::corrplot(correlation_matrix, method = 'number', type = "lower", order = "hclust", tl.col = "black", tl.srt = 45)
+```
+
+## Drop column Score 5
+
+```{r}
+drop_col   <- c("Score5")
+df         <- df[ , !(names(df) %in% drop_col)]
+```
+
+
+# SMOTE
+
+```{r}
+smote_df <- DMwR::SMOTE(Label ~ ., df, perc.over = 600,perc.under=100)
+prop.table(table(smote_df$Label))
+```
+
+# Normalize
+
+```{r}
+normalize <- function(x) { return ((x - min(x)) / (max(x) - min(x))) }
+```
+
+```{r}
+numericals                         <- cbind("Expense",	"Income",	"Score1",	"Score2",	"Score3",	"Score4")
+df[, numericals] <- as.data.frame(lapply(df[, numericals], normalize))
+smote_df[, numericals] <- as.data.frame(lapply(smote_df[, numericals], normalize))
+test_x[, numericals] <- as.data.frame(lapply(test_x[, numericals], normalize))
+```
+
+# 1. Logistic Regression
+
+```{r}
+func <- function(data, lev = NULL, model = NULL) {
+  recall <- signif(caret::sensitivity(data$pred , data$obs, positive="1"), digits = 3)
+  precision <- signif(caret::posPredValue(data$pred , data$obs, positive="1"), digits = 3)
+  F1 <- signif((2 * precision * recall) / (precision + recall), digits = 3)
+  confusion_matrix <- caret::confusionMatrix(data$pred , data$obs,  positive= "1", dnn = c("Prediction", "True"))
+  accuracy <- confusion_matrix$overall["Accuracy"]
+  kappa <- confusion_matrix$overall["Kappa"]
+  c(Recall = recall, Precision = precision, F1 = F1,Accuracy = accuracy, Kappa = kappa)
+}
+```
+
+Building the model
+```{r}
+smote_lr_kcv <- caret::train(Label ~ ., data = smote_df[, cols_to_train],
+                        method="glm", family = "binomial", trControl = caret::trainControl(method="cv",number = 5, summaryFunction = func))
+
+smote_lr_kcv
+```
+```{r}
+smote_lr_kcv$finalModel
+```
+
+```{r}
+summary(smote_lr_kcv)
+```
+
+
+# 2. KNN
+
+Building the model
+```{r}
+smote_knn_kcv <- caret::train(Label ~ ., data = smote_df[, ncols_to_train],
+                        method="knn", trControl = caret::trainControl(method="cv",number = 5,
+                                                                      summaryFunction = func),  
+                        preProcess = c("center","scale")
+                       )
+smote_knn_kcv
+```
+
+```{r}
+smote_knn_kcv$finalModel
+```
+
+```{r}
+caret::varImp(smote_knn_kcv)
+```
+
+```{r}
+plot(smote_knn_kcv)
+```
+
+
+#3. Tree
+
+Building the model
+```{r}
+smote_tree_kcv <- caret::train(Label ~ ., data = smote_df[, cols_to_train],
+                        method="rpart", trControl = caret::trainControl(method = "cv", number = 5,
+                                                                        summaryFunction = func))
+smote_tree_kcv
+```
+
+
+# 4. Random Forest
+
+class weights
+
+```{r}
+wt0 <-  nrow(df)/ (table(df$Label)[1] * 2)
+wt1 <-  nrow(df)/ (table(df$Label)[2] * 2)
+print(wt0)
+print(wt1)                     
+wt <-  ifelse(df$Label == "0", wt0, wt1)
+```
+
+Building the model
+```{r}
+set.seed(17)
+imputed_rf_kcv <- caret::train(Label ~ ., data = df[, cols_to_train], 
+                         method = "rf", 
+                         trControl = caret::trainControl(method = "cv", number = 5, summaryFunction = func),
+                         weights = wt)
+imputed_rf_kcv
+```
+
+```{r}
+imputed_rf_kcv$finalModel
+```
+
+#5. Boosting - GBM
+
+Building the model
+```{r}
+imputed_gbm_kcv <- caret::train(Label ~ ., data = df[, cols_to_train], 
+                 method = "gbm", 
+                 trControl = caret::trainControl(method = "cv", number = 5, summaryFunction = func), verbose = FALSE, weights = wt)
+imputed_gbm_kcv
+```
+
+```{r}
+imputed_gbm_kcv$finalModel
+```
+
+```{r}
+summary(imputed_gbm_kcv)
+```
+
+# Summary
+
+
+```{r}
+model_name <- list("Logistic Regression on Smote data", "KNN on Smote data", "Tree on Smote data", "Random Forest on Imputed data", "GBM on Imputed data")
+accuracy   <- list(mean(smote_lr_kcv$results$Accuracy.Accuracy), 
+                   mean(smote_knn_kcv$results$Accuracy.Accuracy), 
+                   mean(smote_tree_kcv$results$Accuracy.Accuracy), 
+                   mean(imputed_rf_kcv$results$Accuracy.Accuracy), 
+                   mean(imputed_gbm_kcv$results$Accuracy.Accuracy))
+precision  <- list(mean(smote_lr_kcv$results$Precision), 
+                   mean(smote_knn_kcv$results$Precision), 
+                   mean(smote_tree_kcv$results$Precision), 
+                   mean(imputed_rf_kcv$results$Precision), 
+                   mean(imputed_gbm_kcv$results$Precision))
+recall     <- list(mean(smote_lr_kcv$results$Recall), 
+                   mean(smote_knn_kcv$results$Recall), 
+                   mean(smote_tree_kcv$results$Recall), 
+                   mean(imputed_rf_kcv$results$Recall), 
+                   mean(imputed_gbm_kcv$results$Recall))
+f1Score    <- list(mean(smote_lr_kcv$results$F1), 
+                   mean(smote_knn_kcv$results$F1), 
+                   mean(smote_tree_kcv$results$F1), 
+                   mean(imputed_rf_kcv$results$F1), 
+                   mean(imputed_gbm_kcv$results$F1))
+
+summary_table        <- data.frame(unlist (model_name), unlist(accuracy), unlist(precision), unlist(recall), unlist(f1Score))
+names(summary_table) <- c("Model", "Accuracy", "Precision", "Recall", "F1Score")
+print(summary_table)
+```
+
+```{r}
+write.csv(summary_table, "..\\data\\summary_models.csv")
+```
+
+# Final Prediction on Test
+
+## Model: KNN K-Fold Cross Validated 
+
+```{r}
+final_preds <- predict(smote_knn_kcv, test_x) 
+test_x["Label_Preds"] <- final_preds
+```
+
+```{r}
+write.csv(test_x$Label_Preds, "..\\final\\pred_y.csv")
+```
+
